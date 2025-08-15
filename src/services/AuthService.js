@@ -10,7 +10,6 @@ GoogleSignin.configure({
 export class AuthService {
   static async signInWithGoogle() {
     try {
-      console.log('Starting Google Sign-In...');
       
       // Check if Google Play Services are available
       await GoogleSignin.hasPlayServices();
@@ -20,7 +19,6 @@ export class AuthService {
       
       // Sign in
       const response = await GoogleSignin.signIn();
-      console.log('Full Google Sign-In response:', JSON.stringify(response, null, 2));
       
       // Handle different response structures
       let user, idToken, serverAuthCode;
@@ -42,7 +40,6 @@ export class AuthService {
         serverAuthCode = response.serverAuthCode;
       }
       
-      console.log('Extracted user:', JSON.stringify(user, null, 2));
       
       if (user && (user.email || user.id)) {
         const userInfo = {
@@ -60,7 +57,6 @@ export class AuthService {
           token_type: 'Bearer'
         };
 
-        console.log('Google authentication successful:', userInfo);
         
         return { 
           tokens, 
@@ -79,7 +75,6 @@ export class AuthService {
   static async signOut() {
     try {
       await GoogleSignin.signOut();
-      console.log('Google sign-out successful');
     } catch (error) {
       console.error('Sign out error:', error);
       throw error;
@@ -99,7 +94,6 @@ export class AuthService {
       const userInfo = await GoogleSignin.getCurrentUser();
       return userInfo;
     } catch (error) {
-      console.error('Get current user error:', error);
       return null;
     }
   }
