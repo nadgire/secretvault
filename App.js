@@ -12,8 +12,11 @@ import {
   ActivityIndicator,
   ScrollView,
   Platform,
+  TextInput,
 } from 'react-native';
 import { AuthService } from './src/services/AuthService';
+import DatabaseService from './src/services/DatabaseService';
+import SyncService from './src/services/SyncService';
 
 // Google G Logo Component with authentic colors
 const GoogleGLogo = ({ size = 20 }) => (
@@ -30,10 +33,47 @@ function App() {
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [userInfo, setUserInfo] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [currentScreen, setCurrentScreen] = useState('signin'); // 'signin' or 'signup'
+  const [isOnline, setIsOnline] = useState(true);
+  const [syncInProgress, setSyncInProgress] = useState(false);
 
   useEffect(() => {
-    checkSignInStatus();
+    initializeApp();
   }, []);
+
+  const initializeApp = async () => {
+    try {
+      // Initialize database
+      await DatabaseService.initDB();
+      
+      // Subscribe to sync events
+      const unsubscribe = SyncService.subscribe((event) => {
+        if (event.isOnline !== undefined) {
+          setIsOnline(event.isOnline);
+        }
+        if (event.syncInProgress !== undefined) {
+          setSyncInProgress(event.syncInProgress);
+        }
+        if (event.syncCompleted) {
+          Alert.alert('Sync Complete', `${event.syncedCount} items synced successfully`);
+        }
+        if (event.syncFailed) {
+          Alert.alert('Sync Failed', event.error);
+        }
+      });
+
+      // Check initial online status
+      await SyncService.checkOnlineStatus();
+      
+      // Check sign-in status
+      await checkSignInStatus();
+      
+      return unsubscribe;
+    } catch (error) {
+      console.error('❌ App initialization failed:', error);
+      Alert.alert('Error', 'Failed to initialize app');
+    }
+  };
 
   const checkSignInStatus = async () => {
     try {
@@ -42,21 +82,84 @@ function App() {
       
       if (signedIn) {
         const user = await AuthService.getCurrentUser();
-        setUserInfo(user?.user || null);
+        let userInfo = user?.user || null;
+        
+        // Try to get user from local database if available
+        if (!userInfo && user?.email) {
+          userInfo = await DatabaseService.getUserByEmail(user.email);
+        }
+        
+        setUserInfo(userInfo);
       }
     } catch (error) {
+      console.error('Check sign-in status error:', error);
     }
   };
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
     try {
-      const result = await AuthService.signInWithGoogle();
+      let result;
+      
+      if (isOnline) {
+        // Online: Try cloud authentication
+        try {
+          result = await AuthService.signInWithGoogle();
+          // Save user offline for future offline access
+          await DatabaseService.saveUserOffline(result.userInfo);
+        } catch (error) {
+          // If cloud fails but we have offline data, use that
+          const user = await AuthService.authenticateWithGoogle();
+          const offlineUser = await DatabaseService.getUserByEmail(user.userInfo.email);
+          if (offlineUser) {
+            result = { userInfo: offlineUser };
+            Alert.alert('Offline Mode', 'Signed in using offline data. Will sync when online.');
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        // Offline: Check local database
+        const user = await AuthService.authenticateWithGoogle();
+        const offlineUser = await DatabaseService.getUserByEmail(user.userInfo.email);
+        if (offlineUser) {
+          result = { userInfo: offlineUser };
+          Alert.alert('Offline Mode', 'Signed in offline. Will sync when connection is restored.');
+        } else {
+          throw new Error('No offline account found. Please connect to internet for first-time sign in.');
+        }
+      }
+      
       setUserInfo(result.userInfo);
       setIsSignedIn(true);
-      Alert.alert('Success', 'Signed in successfully!');
+      
+      if (isOnline) {
+        Alert.alert('Success', 'Signed in successfully!');
+      }
     } catch (error) {
       Alert.alert('Error', error.message || 'Failed to sign in');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignUp = async () => {
+    setLoading(true);
+    try {
+      if (!isOnline) {
+        Alert.alert('No Internet', 'Internet connection required for account creation.');
+        return;
+      }
+      
+      const result = await AuthService.signUpWithGoogle();
+      // Save user offline for future offline access
+      await DatabaseService.saveUserOffline(result.userInfo);
+      
+      setUserInfo(result.userInfo);
+      setIsSignedIn(true);
+      Alert.alert('Success', 'Account created and signed in successfully!');
+    } catch (error) {
+      Alert.alert('Error', error.message || 'Failed to create account');
     } finally {
       setLoading(false);
     }
@@ -72,6 +175,21 @@ function App() {
       Alert.alert('Error', 'Failed to sign out');
     }
   };
+
+  const handleManualSync = async () => {
+    if (!isOnline) {
+      Alert.alert('Offline', 'Cannot sync while offline. Please check your connection.');
+      return;
+    }
+    
+    const result = await SyncService.performSync();
+    if (result.success) {
+      Alert.alert('Sync Complete', result.message);
+    } else {
+      Alert.alert('Sync Failed', result.message);
+    }
+  };
+
 
   return (
     <SafeAreaView style={styles.container}>
@@ -100,6 +218,19 @@ function App() {
               </View>
             </View>
 
+            {/* Network Status Bar */}
+            <View style={[styles.networkStatus, { backgroundColor: isOnline ? '#10b981' : '#ef4444' }]}>
+              <Text style={styles.networkStatusText}>
+                {isOnline ? '🟢 Online' : '🔴 Offline'} 
+                {syncInProgress && ' - Syncing...'}
+              </Text>
+              {isOnline && !syncInProgress && (
+                <TouchableOpacity onPress={handleManualSync} style={styles.syncButton}>
+                  <Text style={styles.syncButtonText}>🔄 Sync</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
             <View style={styles.userSection}>
               <View style={styles.userCard}>
                 <View style={styles.userInfo}>
@@ -115,6 +246,9 @@ function App() {
                   <View style={styles.userDetails}>
                     <Text style={styles.userName}>{userInfo.name}</Text>
                     <Text style={styles.userEmail}>{userInfo.email}</Text>
+                    <Text style={styles.userStatus}>
+                      {!isOnline ? 'Working offline' : 'Connected to cloud'}
+                    </Text>
                   </View>
                 </View>
                 
@@ -128,8 +262,8 @@ function App() {
               </View>
             </View>
           </View>
-        ) : (
-          // Login View
+        ) : currentScreen === 'signin' ? (
+          // Sign In Screen
           <View style={styles.loginContainer}>
             <View style={styles.loginHeader}>
               <View style={styles.brandSection}>
@@ -146,7 +280,7 @@ function App() {
             <View style={styles.loginFormContainer}>
               <View style={styles.loginCard}>
                 <View style={styles.cardContent}>
-                  <Text style={styles.loginTitle}>Welcome</Text>
+                  <Text style={styles.loginTitle}>Welcome Back</Text>
                   <Text style={styles.loginSubtitle}>
                     Sign in to access your secure vault
                   </Text>
@@ -169,6 +303,69 @@ function App() {
                     </View>
                   </TouchableOpacity>
 
+                  <View style={styles.orDivider}>
+                    <View style={styles.dividerLine} />
+                    <Text style={styles.orText}>or</Text>
+                    <View style={styles.dividerLine} />
+                  </View>
+
+                  <View style={styles.switchContainer}>
+                    <Text style={styles.switchText}>Don't have an account? </Text>
+                    <TouchableOpacity onPress={() => setCurrentScreen('signup')}>
+                      <Text style={styles.switchLink}>Sign Up</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+              
+              <View style={styles.footer}>
+                <Text style={styles.footerText}>
+                  Protected by industry-standard encryption
+                </Text>
+              </View>
+            </View>
+          </View>
+        ) : (
+          // Sign Up Screen
+          <View style={styles.loginContainer}>
+            <View style={styles.loginHeader}>
+              <View style={styles.brandSection}>
+                <Image 
+                  source={require('./src/assets/images/logo.png')} 
+                  style={styles.logo}
+                  resizeMode="contain"
+                />
+                <Text style={styles.brandName}>SecretVault</Text>
+                <Text style={styles.brandTagline}>Secure Password Management</Text>
+              </View>
+            </View>
+
+            <View style={styles.loginFormContainer}>
+              <View style={styles.loginCard}>
+                <View style={styles.cardContent}>
+                  <Text style={styles.loginTitle}>Join SecretVault</Text>
+                  <Text style={styles.loginSubtitle}>
+                    Create your account with Google to get started
+                  </Text>
+                  
+                  <TouchableOpacity
+                    style={[styles.googleButton, loading && styles.buttonDisabled]}
+                    onPress={handleGoogleSignUp}
+                    disabled={loading}
+                    activeOpacity={0.95}
+                  >
+                    <View style={styles.googleButtonContent}>
+                      {loading ? (
+                        <ActivityIndicator size="small" color="#1a73e8" style={styles.loadingIcon} />
+                      ) : (
+                        <GoogleGLogo size={20} />
+                      )}
+                      <Text style={styles.googleButtonText}>
+                        {loading ? 'Creating Account...' : 'Sign up with Google'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
                   <View style={styles.trustIndicators}>
                     <View style={styles.trustItem}>
                       <Text style={styles.trustIcon}>🔐</Text>
@@ -179,12 +376,19 @@ function App() {
                       <Text style={styles.trustText}>Zero-knowledge security</Text>
                     </View>
                   </View>
+
+                  <View style={styles.switchContainer}>
+                    <Text style={styles.switchText}>Already have an account? </Text>
+                    <TouchableOpacity onPress={() => setCurrentScreen('signin')}>
+                      <Text style={styles.switchLink}>Sign In</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </View>
               
               <View style={styles.footer}>
                 <Text style={styles.footerText}>
-                  Protected by industry-standard encryption
+                  By signing up, you agree to our Terms of Service
                 </Text>
               </View>
             </View>
@@ -483,6 +687,72 @@ const styles = StyleSheet.create({
   signOutButtonText: {
     color: '#ffffff',
     fontSize: 16,
+    fontWeight: '600',
+  },
+
+  // Network Status Bar
+  networkStatus: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    marginHorizontal: 24,
+    marginBottom: 16,
+    borderRadius: 8,
+  },
+  networkStatusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  syncButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 6,
+  },
+  syncButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  userStatus: {
+    fontSize: 12,
+    color: '#9ca3af',
+    marginTop: 2,
+  },
+
+  // Navigation Elements
+  orDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#e5e7eb',
+  },
+  orText: {
+    marginHorizontal: 16,
+    fontSize: 14,
+    color: '#6b7280',
+    fontWeight: '500',
+  },
+  switchContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  switchText: {
+    fontSize: 14,
+    color: '#6b7280',
+  },
+  switchLink: {
+    fontSize: 14,
+    color: '#3b82f6',
     fontWeight: '600',
   },
 });

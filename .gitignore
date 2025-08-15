@@ -22,7 +22,9 @@ DerivedData
 *.xcuserstate
 **/.xcode.env.local
 .env
-
+.claude
+RENDER-DEPLOYMENT.md
+DEPLOYMENT.md
 # Android/IntelliJ
 #
 build/
